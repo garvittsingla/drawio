@@ -13,6 +13,19 @@ window.ICONSEARCH_PATH = null;
 		var originalUpdateAuthInfo = DriveClient.prototype.updateAuthInfo;
 		var originalSetPersistentToken = DriveClient.prototype.setPersistentToken;
 
+		// Fix redirectUri to point to google.html (static file) instead of /google (Java servlet)
+		DriveClient.prototype.redirectUri = window.location.origin +
+			window.location.pathname.substring(0, window.location.pathname.lastIndexOf('/') + 1) +
+			'google.html';
+
+		// Override logout: instead of navigating the whole page to /google?doLogout=1
+		// (which 404s on static hosting), just clear the token locally.
+		DriveClient.prototype.logout = function()
+		{
+			this.clearPersistentToken();
+			this.setUser(null);
+		};
+
 		// Override setPersistentToken to preserve access_token
 		DriveClient.prototype.setPersistentToken = function(userAuthInfo, sessionOnly)
 		{
@@ -76,7 +89,7 @@ window.ICONSEARCH_PATH = null;
 
 			// 2. Perform client-side implicit OAuth flow
 			var state = Math.random().toString(36).substring(2);
-			var redirectUri = window.location.origin + window.location.pathname.substring(0, window.location.pathname.lastIndexOf("/")) + "/google.html";
+			var redirectUri = this.redirectUri;
 			
 			var url = 'https://accounts.google.com/o/oauth2/v2/auth?client_id=' + this.clientId +
 					'&redirect_uri=' + encodeURIComponent(redirectUri) + 
