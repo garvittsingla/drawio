@@ -5,28 +5,81 @@
 // null'ing of global vars need to be after init.js
 window.ICONSEARCH_PATH = null;
 
-// Monkey-patch DriveClient to work client-side only (implicit OAuth2 flow)
-(function() {
-	if (window.DriveClient)
+// Monkey-patch DriveClient to work on static hosting (no Java backend).
+//
+// Background: app.min.js's authorizeStep2() has two branches:
+//   1. immediate=true  + userId!=null  → XHR to /google?state=...&userId=... (server token refresh) ← FAILS
+//   2. immediate=false                 → OAuth popup, response_type=token (already works!)
+// When branch 1 gets a 404 it calls logout(), which XHRs /google?doLogout=1  ← ALSO FAILS
+//
+// Fix: override authorizeStep2 so that when immediate=true, it always calls error()
+// immediately (no server round-trip). Also override logout() to clear state locally.
+(function()
+{
+	if (typeof window.DriveClient === 'function')
 	{
-		var originalAuthorize = DriveClient.prototype.authorize;
+		var originalAuthorizeStep2 = DriveClient.prototype.authorizeStep2;
 		var originalUpdateAuthInfo = DriveClient.prototype.updateAuthInfo;
 		var originalSetPersistentToken = DriveClient.prototype.setPersistentToken;
 
-		// Fix redirectUri to point to google.html (static file) instead of /google (Java servlet)
-		DriveClient.prototype.redirectUri = window.location.origin +
-			window.location.pathname.substring(0, window.location.pathname.lastIndexOf('/') + 1) +
-			'google.html';
+		// Override authorizeStep2: skip the server-side token-refresh XHR when immediate=true.
+		// Instead, check our locally-stored access_token; if still valid use it,
+		// otherwise fail immediately so the app shows the sign-in dialog.
+		DriveClient.prototype.authorizeStep2 = function(localState, immediate, success, error, remember, popup)
+		{
+			if (immediate)
+			{
+				// Try to reuse a locally cached, non-expired token.
+				try
+				{
+					var stored = JSON.parse(this.getPersistentToken(true));
+					if (stored && stored.current &&
+					    stored.current.access_token &&
+					    stored.current.expires > Date.now() + 60000)
+					{
+						var tok = stored.current;
+						var authInfo = {
+							access_token: tok.access_token,
+							expires_in: Math.round((tok.expires - Date.now()) / 1000),
+							remember: tok.remember
+						};
+						this.updateAuthInfo(authInfo, tok.remember, false, success, error);
+						return;
+					}
+				}
+				catch (e) {}
 
-		// Override logout: instead of navigating the whole page to /google?doLogout=1
-		// (which 404s on static hosting), just clear the token locally.
+				// No valid cached token → fail immediately (no server call).
+				if (error != null) { error(); }
+				return;
+			}
+
+			// For non-immediate (interactive), delegate to the original so the
+			// OAuth popup opens normally with response_type=token → google.html.
+			originalAuthorizeStep2.call(this, localState, immediate, success, error, remember, popup);
+		};
+
+		// Override logout: original navigates (via XHR/loadUrl) to /google?doLogout=1
+		// which 404s on static hosting. Just clear state locally instead.
 		DriveClient.prototype.logout = function()
 		{
 			this.clearPersistentToken();
 			this.setUser(null);
 		};
 
-		// Override setPersistentToken to preserve access_token
+		// Override updateAuthInfo to preserve the access_token so we can re-read
+		// it from localStorage on the next page load (the original deletes it).
+		DriveClient.prototype.updateAuthInfo = function(newAuthInfo, remember, forceUserUpdate, success, error)
+		{
+			// Keep a reference to the raw token before the original deletes it.
+			this.currentAccessToken = newAuthInfo.access_token;
+
+			var copy = Object.assign({}, newAuthInfo);
+			originalUpdateAuthInfo.call(this, copy, remember, forceUserUpdate, success, error);
+		};
+
+		// Override setPersistentToken to re-inject the access_token that the
+		// original updateAuthInfo deleted (so it survives page reloads).
 		DriveClient.prototype.setPersistentToken = function(userAuthInfo, sessionOnly)
 		{
 			if (this.currentAccessToken && userAuthInfo)
@@ -34,124 +87,6 @@ window.ICONSEARCH_PATH = null;
 				userAuthInfo.access_token = this.currentAccessToken;
 			}
 			originalSetPersistentToken.call(this, userAuthInfo, sessionOnly);
-		};
-
-		// Override updateAuthInfo to keep access_token in memory and skip delete
-		DriveClient.prototype.updateAuthInfo = function (newAuthInfo, remember, forceUserUpdate, success, error)
-		{
-			this.currentAccessToken = newAuthInfo.access_token;
-			
-			// We pass a copy to originalUpdateAuthInfo so its internal deletion of access_token
-			// doesn't affect our persistent storage where we want to keep access_token
-			var newAuthInfoCopy = Object.assign({}, newAuthInfo);
-			originalUpdateAuthInfo.call(this, newAuthInfoCopy, remember, forceUserUpdate, success, error);
-		};
-
-		// Override authorize to use client-side OAuth flow
-		DriveClient.prototype.authorize = function(immediate, success, error, remember, popup)
-		{
-			var self = this;
-			
-			// 1. Check if we have a valid cached token
-			var authInfo = null;
-			try
-			{
-				authInfo = JSON.parse(this.getPersistentToken(true));
-			}
-			catch(e) {}
-
-			if (authInfo != null && authInfo.current != null && authInfo.current.access_token != null && authInfo.current.expires > Date.now() + 60000)
-			{
-				var tokenDetails = authInfo.current;
-				var newAuthInfo = {
-					access_token: tokenDetails.access_token,
-					expires_in: Math.round((tokenDetails.expires - Date.now()) / 1000),
-					remember: tokenDetails.remember
-				};
-				this.currentAccessToken = tokenDetails.access_token;
-				this.userId = tokenDetails.userId;
-				this.user = authInfo[this.userId] ? authInfo[this.userId].user : null;
-				
-				// Call originalUpdateAuthInfo to set closure _token and set authCalled
-				originalUpdateAuthInfo.call(this, newAuthInfo, tokenDetails.remember, false, success, error);
-				return;
-			}
-
-			// If immediate is true, we cannot show a popup, so we fail immediate auth
-			if (immediate)
-			{
-				if (error != null)
-				{
-					error();
-				}
-				return;
-			}
-
-			// 2. Perform client-side implicit OAuth flow
-			var state = Math.random().toString(36).substring(2);
-			var redirectUri = this.redirectUri;
-			
-			var url = 'https://accounts.google.com/o/oauth2/v2/auth?client_id=' + this.clientId +
-					'&redirect_uri=' + encodeURIComponent(redirectUri) + 
-					'&response_type=token' + // implicit flow
-					'&include_granted_scopes=true' +
-					'&scope=' + encodeURIComponent(this.scopes.join(' ')) +
-					'&state=' + encodeURIComponent('cId=' + this.clientId + '&domain=' + window.location.host + '&token=' + state);
-
-			if (this.sameWinAuthMode)
-			{
-				window.location.assign(url);
-				popup = null;
-			}
-			else if (popup == null)
-			{
-				popup = this.createAuthWin(url);
-			}
-			else
-			{
-				popup.location = url;
-			}
-
-			if (popup != null)
-			{
-				window.onGoogleDriveCallback = function(newAuthInfo, authWindow)
-				{
-					window.onGoogleDriveCallback = null;
-					try
-					{
-						if (newAuthInfo == null)
-						{
-							if (error != null)
-							{
-								error({message: mxResources.get('accessDenied')});
-							}
-						}
-						else
-						{
-							self.updateAuthInfo(newAuthInfo, remember, true, success, error);
-						}
-					}
-					catch (e)
-					{
-						if (error != null)
-						{
-							error(e);
-						}
-					}
-					finally
-					{
-						if (authWindow != null)
-						{
-							authWindow.close();
-						}
-					}
-				};
-				popup.focus();
-			}
-			else if (error != null)
-			{
-				error({message: mxResources.get('allowPopups')});
-			}
 		};
 	}
 })();
