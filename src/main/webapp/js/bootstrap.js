@@ -306,12 +306,11 @@ else
         {
             mxscript('js/app.min.js', function()
             {
-                mxScriptsLoaded = true;
-                checkAllLoaded();
-                
                 // Electron
                 if (mxIsElectron)
                 {
+                    mxScriptsLoaded = true;
+                    checkAllLoaded();
                     mxscript('js/diagramly/DesktopLibrary.js', function()
                     {
                         mxscript('js/diagramly/ElectronApp.js', function()
@@ -343,7 +342,20 @@ else
                 }
                 else if (!supportedDomain)
                 {
-                    mxscript('js/PostConfig.js');
+                    // Load PostConfig.js BEFORE calling checkAllLoaded() so that
+                    // DriveClient prototype overrides are applied before App.main() runs.
+                    // Without this, the app auto-reconnects to Google Drive using the
+                    // old /google servlet URL before PostConfig.js has a chance to override it.
+                    mxscript('js/PostConfig.js', function()
+                    {
+                        mxScriptsLoaded = true;
+                        checkAllLoaded();
+                    });
+                }
+                else
+                {
+                    mxScriptsLoaded = true;
+                    checkAllLoaded();
                 }
             });
         };
