@@ -76,13 +76,6 @@
 		</div>
 	</div>
 	<script src="js/main.js"></script>
-	<script type="text/javascript">
-		// Override Google Drive OAuth redirect URI to use static google.html
-		// (no Java servlet needed — works with static file hosting)
-		if (typeof DriveClient !== 'undefined') {
-			DriveClient.prototype.redirectUri = 'https://drawio.garvitsingla.in/google.html';
-		}
-	</script>
 </body>
 
 </html>

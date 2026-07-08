@@ -61,7 +61,7 @@ mxUtils.extend(DriveClient, mxEventSource);
 // Extends DrawioClient
 mxUtils.extend(DriveClient, DrawioClient);
 
-DriveClient.prototype.redirectUri = window.DRAWIO_SERVER_URL + 'google';
+DriveClient.prototype.redirectUri = window.DRAWIO_SERVER_URL + 'google.html';
 DriveClient.prototype.GDriveBaseUrl = 'https://www.googleapis.com/drive/v2';
 
 /**
@@ -550,19 +550,9 @@ DriveClient.prototype.authorize = function(immediate, success, error, remember, 
 		return;
 	}
 
-	var req = new mxXmlRequest(this.redirectUri + '?getState=1', null, 'GET');
-	
-	req.send(mxUtils.bind(this, function(req)
-	{
-		if (req.getStatus() >= 200 && req.getStatus() <= 299)
-		{
-			this.authorizeStep2(req.getText(), immediate, success, error, remember, popup);
-		}
-		else if (error != null)
-		{
-			error(req);
-		}
-	}), error);
+	// Static hosting: generate state locally instead of fetching from server
+	var localState = Math.random().toString(36).substring(2) + Date.now().toString(36);
+	this.authorizeStep2(localState, immediate, success, error, remember, popup);
 };
 
 /**
@@ -642,63 +632,23 @@ DriveClient.prototype.authorizeStep2 = function(state, immediate, success, error
 		}
 		else
 		{
-			//Retry request with refreshed token (in the cookie)
-			if (immediate) //Note, we checked refresh token is not null above
+			// Static hosting: no server-side token refresh available; force re-auth
+			if (immediate)
 			{
-				//state is used to identify which app/domain is used
-				var req = new mxXmlRequest(this.redirectUri + '?state=' + encodeURIComponent('cId=' + this.clientId +
-					'&domain=' + window.location.host + '&token=' + state) + '&userId=' + this.userId, null, 'GET');
-				
-				req.send(mxUtils.bind(this, function(req)
+				if (error != null)
 				{
-					try
-					{
-						if (req.getStatus() >= 200 && req.getStatus() <= 299)
-						{
-							var newAuthInfo = JSON.parse(req.getText());
-							this.updateAuthInfo(newAuthInfo, true, false, success, error); //We set remember to true since we can only have a refresh token if user initially selected remember
-						}
-						else 
-						{
-							//When the request fails (e.g, Hibernate on Windows), the status is 0, this doesn't mean the token is invalid
-							if (req.getStatus() != 0)
-							{
-								this.logout();
-							}
-
-							if (error != null)
-							{
-								error(req); //TODO review this code path and how error is handled
-							}
-						}
-					}
-					catch (e)
-					{
-						if (window.console != null)
-						{
-							console.log('DriveClient.authorizeStep2', e);
-						}
-
-						if (error != null)
-						{
-							error(e);
-						}
-						else
-						{
-							throw e;
-						}
-					}
-				}), error);
+					error({message: 'Token refresh not supported in static mode. Please sign in again.'});
+				}
 			}
 			else
 			{
+				// Use implicit flow (response_type=token) - no backend required
 				var url = 'https://accounts.google.com/o/oauth2/v2/auth?client_id=' + this.clientId +
 						'&redirect_uri=' + encodeURIComponent(this.redirectUri) + 
-						'&response_type=code&include_granted_scopes=true' +
-						(remember? '&access_type=offline&prompt=consent%20select_account' : '') + //Ask for consent again to get a new refresh token
+						'&response_type=token&include_granted_scopes=true' +
+						'&prompt=select_account' +
 						'&scope=' + encodeURIComponent(this.scopes.join(' ')) +
-						'&state=' + encodeURIComponent('cId=' + this.clientId + '&domain=' + window.location.host + '&token=' + state + //To identify which app/domain is used
-						(this.sameWinRedirectUrl? '&redirect=' + this.sameWinRedirectUrl : '')); 
+						'&state=' + encodeURIComponent('cId=' + this.clientId + '&domain=' + window.location.host); 
 				
 				if (this.sameWinAuthMode)
 				{
